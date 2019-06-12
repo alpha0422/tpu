@@ -241,6 +241,9 @@ flags.DEFINE_bool(
 flags.DEFINE_bool(
     'use_amp', default=False, help=('Enable automatic mixed precision'))
 
+flags.DEFINE_bool(
+    'use_xla', default=False, help=('Enable XLA with CUDA.'))
+
 # The input tensor is in the range of [0, 255], we need to scale them to the
 # range of [0, 1]
 MEAN_RGB = [0.485 * 255, 0.456 * 255, 0.406 * 255]
@@ -583,16 +586,23 @@ def main(unused_argv):
     save_checkpoints_steps = None
   else:
     save_checkpoints_steps = max(100, FLAGS.iterations_per_loop)
+
+  if FLAGS.use_tpu:
+    graph_options=tf.GraphOptions(
+        rewrite_options=rewriter_config_pb2.RewriterConfig(
+            disable_meta_optimizer=True))
+  else:
+    graph_options=tf.GraphOptions()
+
+  if FLAGS.use_xla:
+    graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+
   config = tf.contrib.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       model_dir=FLAGS.model_dir,
       save_checkpoints_steps=save_checkpoints_steps,
       log_step_count_steps=FLAGS.log_step_count_steps,
-      session_config=tf.ConfigProto(
-          graph_options=tf.GraphOptions(
-              rewrite_options=rewriter_config_pb2.RewriterConfig(
-                  disable_meta_optimizer=True)) if \
-          FLAGS.use_tpu else tf.GraphOptions()),
+      session_config=tf.ConfigProto(graph_options=graph_options),
       tpu_config=tf.contrib.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           per_host_input_for_training=tf.contrib.tpu.InputPipelineConfig
