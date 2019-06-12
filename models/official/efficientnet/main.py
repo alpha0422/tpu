@@ -238,6 +238,9 @@ flags.DEFINE_float(
 flags.DEFINE_bool(
     'use_async_checkpointing', default=False, help=('Enable async checkpoint'))
 
+flags.DEFINE_bool(
+    'use_amp', default=False, help=('Enable automatic mixed precision'))
+
 # The input tensor is in the range of [0, 255], we need to scale them to the
 # range of [0, 1]
 MEAN_RGB = [0.485 * 255, 0.456 * 255, 0.406 * 255]
@@ -560,6 +563,9 @@ def export(est, export_dir, input_image_size=None):
 
 def main(unused_argv):
 
+  if FLAGS.use_amp:
+    os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
+
   input_image_size = FLAGS.input_image_size
   if not input_image_size:
     if FLAGS.model_name.startswith('efficientnet'):
@@ -585,7 +591,8 @@ def main(unused_argv):
       session_config=tf.ConfigProto(
           graph_options=tf.GraphOptions(
               rewrite_options=rewriter_config_pb2.RewriterConfig(
-                  disable_meta_optimizer=True))),
+                  disable_meta_optimizer=True)) if \
+          FLAGS.use_tpu else tf.GraphOptions()),
       tpu_config=tf.contrib.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           per_host_input_for_training=tf.contrib.tpu.InputPipelineConfig
