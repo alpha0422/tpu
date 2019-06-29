@@ -279,8 +279,12 @@ def model_fn(features, labels, mode, params):
     features = tf.transpose(features, [3, 0, 1, 2])  # HWCN to NHWC
 
   # Normalize the image to zero mean and unit variance.
-  features -= tf.constant(MEAN_RGB, shape=[1, 1, 3], dtype=features.dtype)
-  features /= tf.constant(STDDEV_RGB, shape=[1, 1, 3], dtype=features.dtype)
+  if FLAGS.data_format == 'channels_last':
+    features -= tf.constant(MEAN_RGB, shape=[1, 1, 3], dtype=features.dtype)
+    features /= tf.constant(STDDEV_RGB, shape=[1, 1, 3], dtype=features.dtype)
+  else:
+    features -= tf.constant(MEAN_RGB, shape=[3, 1, 1], dtype=features.dtype)
+    features /= tf.constant(STDDEV_RGB, shape=[3, 1, 1], dtype=features.dtype)
 
   is_training = (mode == tf.estimator.ModeKeys.TRAIN)
   has_moving_average_decay = (FLAGS.moving_average_decay > 0)
