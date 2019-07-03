@@ -39,8 +39,8 @@ GlobalParams = collections.namedtuple('GlobalParams', [
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
-# batchnorm = tf.layers.BatchNormalization
-batchnorm = utils.TpuBatchNormalization  # TPU-specific requirement.
+batchnorm = tf.layers.BatchNormalization
+#batchnorm = utils.TpuBatchNormalization  # TPU-specific requirement.
 relu_fn = tf.nn.relu6
 
 
@@ -176,6 +176,7 @@ class MBConvBlock(object):
           data_format=self._data_format,
           use_bias=False)
       self._bn0 = batchnorm(
+          fused=True,
           axis=self._channel_axis,
           momentum=self._batch_norm_momentum,
           epsilon=self._batch_norm_epsilon)
@@ -190,6 +191,7 @@ class MBConvBlock(object):
         data_format=self._data_format,
         use_bias=False)
     self._bn1 = batchnorm(
+        fused=True,
         axis=self._channel_axis,
         momentum=self._batch_norm_momentum,
         epsilon=self._batch_norm_epsilon)
@@ -226,6 +228,7 @@ class MBConvBlock(object):
         data_format=self._data_format,
         use_bias=False)
     self._bn2 = batchnorm(
+        fused=True,
         axis=self._channel_axis,
         momentum=self._batch_norm_momentum,
         epsilon=self._batch_norm_epsilon)
@@ -350,6 +353,7 @@ class Model(tf.keras.Model):
         data_format=self._global_params.data_format,
         use_bias=False)
     self._bn0 = batchnorm(
+        fused=True,
         axis=channel_axis,
         momentum=batch_norm_momentum,
         epsilon=batch_norm_epsilon)
@@ -363,6 +367,7 @@ class Model(tf.keras.Model):
         padding='same',
         use_bias=False)
     self._bn1 = batchnorm(
+        fused=True,
         axis=channel_axis,
         momentum=batch_norm_momentum,
         epsilon=batch_norm_epsilon)
