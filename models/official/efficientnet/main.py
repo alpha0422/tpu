@@ -574,6 +574,12 @@ def main(unused_argv):
   if FLAGS.use_amp:
     os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
 
+    # TODO: remove it once AMP add depth-wise conv to whitelist
+    depth_conv_list = ['DepthwiseConv2dNative',
+      'DepthwiseConv2dNativeBackpropFilter',
+      'DepthwiseConv2dNativeBackpropInput']
+    os.environ['TF_AUTO_MIXED_PRECISION_GRAPH_REWRITE_WHITELIST_ADD'] = ','.join(depth_conv_list)
+
   input_image_size = FLAGS.input_image_size
   if not input_image_size:
     if FLAGS.model_name.startswith('efficientnet'):
