@@ -42,8 +42,7 @@ GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 # FIXME: use sync BN for distributed training
 batchnorm = tf.layers.BatchNormalization
 # batchnorm = utils.TpuBatchNormalization  # TPU-specific requirement.
-# FIXME: change to tf.nn.swish once AMP support it
-relu_fn = tf.nn.relu6
+relu_fn = tf.nn.swish
 
 
 BlockArgs = collections.namedtuple('BlockArgs', [
