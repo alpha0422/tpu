@@ -20,35 +20,14 @@ into (image, labels) tuple for RetinaNet.
 T.-Y. Lin, P. Goyal, R. Girshick, K. He,  and P. Dollar
 Focal Loss for Dense Object Detection. arXiv:1708.02002
 """
-
-import tensorflow as tf
-
+from absl import logging
+import tensorflow.compat.v1 as tf
 from dataloader import anchor
 from dataloader import mode_keys as ModeKeys
-from utils import autoaugment_utils
+from dataloader import tf_example_decoder
 from utils import box_utils
+from utils import dataloader_utils
 from utils import input_utils
-from utils.object_detection import tf_example_decoder
-
-
-def process_source_id(source_id):
-  """Processes source_id to the right format."""
-  if source_id.dtype == tf.string:
-    source_id = tf.cast(tf.string_to_number(source_id), tf.int32)
-  with tf.control_dependencies([source_id]):
-    source_id = tf.cond(tf.equal(tf.size(source_id), 0),
-                        lambda: tf.cast(tf.constant(-1), tf.int32),
-                        lambda: tf.identity(source_id))
-  return source_id
-
-
-def pad_groundtruths_to_fixed_size(gt, n):
-  """Pads the first dimension of groundtruths labels to the fixed size."""
-  gt['boxes'] = input_utils.pad_to_fixed_size(gt['boxes'], n, -1)
-  gt['is_crowds'] = input_utils.pad_to_fixed_size(gt['is_crowds'], n, 0)
-  gt['areas'] = input_utils.pad_to_fixed_size(gt['areas'], n, -1)
-  gt['classes'] = input_utils.pad_to_fixed_size(gt['classes'], n, -1)
-  return gt
 
 
 class Parser(object):
@@ -71,6 +50,7 @@ class Parser(object):
                skip_crowd_during_training=True,
                max_num_instances=100,
                use_bfloat16=True,
+               regenerate_source_id=False,
                mode=None):
     """Initializes parameters for parsing annotations in the dataset.
 
@@ -109,15 +89,18 @@ class Parser(object):
       max_num_instances: `int` number of maximum number of instances in an
         image. The groundtruth data will be padded to `max_num_instances`.
       use_bfloat16: `bool`, if True, cast output image to tf.bfloat16.
-      mode: a ModeKeys. Specifies if this is training, evaluation, prediction
-        or prediction with groundtruths in the outputs.
+      regenerate_source_id: `bool`, if True TFExampleParser will use hashed
+        value of `image/encoded` for `image/source_id`.
+      mode: a ModeKeys. Specifies if this is training, evaluation, prediction or
+        prediction with groundtruths in the outputs.
     """
     self._mode = mode
     self._max_num_instances = max_num_instances
     self._skip_crowd_during_training = skip_crowd_during_training
     self._is_training = (mode == ModeKeys.TRAIN)
 
-    self._example_decoder = tf_example_decoder.TfExampleDecoder()
+    self._example_decoder = tf_example_decoder.TfExampleDecoder(
+        include_mask=False, regenerate_source_id=regenerate_source_id)
 
     # Anchor.
     self._output_size = output_size
@@ -218,6 +201,12 @@ class Parser(object):
     # NOTE: The autoaugment method works best when used alongside the standard
     # horizontal flipping of images along with size jittering and normalization.
     if self._use_autoaugment:
+      try:
+        from utils import autoaugment_utils  # pylint: disable=g-import-not-at-top
+      except ImportError as e:
+        logging.exception('Autoaugment is not supported in TF 2.x.')
+        raise e
+
       image, boxes = autoaugment_utils.distort_image_with_autoaugment(
           image, boxes, self._autoaugment_policy_name)
 
@@ -231,6 +220,7 @@ class Parser(object):
       image, boxes = input_utils.random_horizontal_flip(image, boxes)
 
     # Converts boxes from normalized coordinates to pixel coordinates.
+    # Now the coordinates of boxes are w.r.t. the original image.
     boxes = box_utils.denormalize_boxes(boxes, image_shape)
 
     # Resizes and crops image.
@@ -244,16 +234,20 @@ class Parser(object):
     image_height, image_width, _ = image.get_shape().as_list()
 
     # Resizes and crops boxes.
+    # Now the coordinates of boxes are w.r.t the scaled image.
     image_scale = image_info[2, :]
     offset = image_info[3, :]
     boxes = input_utils.resize_and_crop_boxes(
-        boxes, image_scale, (image_height, image_width), offset)
+        boxes, image_scale, image_info[1, :], offset)
+
     # Filters out ground truth boxes that are all zeros.
-    indices = input_utils.get_non_empty_box_indices(boxes)
+    indices = box_utils.get_non_empty_box_indices(boxes)
     boxes = tf.gather(boxes, indices)
     classes = tf.gather(classes, indices)
 
-    # Assigns anchors.
+    # Assigns anchor targets.
+    # Note that after the target assignment, box targets are absolute pixel
+    # offsets w.r.t. the scaled image.
     input_anchor = anchor.Anchor(
         self._min_level, self._max_level, self._num_scales,
         self._aspect_ratios, self._anchor_size, (image_height, image_width))
@@ -307,9 +301,9 @@ class Parser(object):
     image_scale = image_info[2, :]
     offset = image_info[3, :]
     boxes = input_utils.resize_and_crop_boxes(
-        boxes, image_scale, (image_height, image_width), offset)
+        boxes, image_scale, image_info[1, :], offset)
     # Filters out ground truth boxes that are all zeros.
-    indices = input_utils.get_non_empty_box_indices(boxes)
+    indices = box_utils.get_non_empty_box_indices(boxes)
     boxes = tf.gather(boxes, indices)
     classes = tf.gather(classes, indices)
 
@@ -330,16 +324,18 @@ class Parser(object):
     # Sets up groundtruth data for evaluation.
     groundtruths = {
         'source_id': data['source_id'],
-        'num_groundtrtuhs': tf.shape(data['groundtruth_classes']),
-        'image_info': image_info,
+        'height': data['height'],
+        'width': data['width'],
+        'num_groundtruths': tf.shape(data['groundtruth_classes']),
         'boxes': box_utils.denormalize_boxes(
             data['groundtruth_boxes'], image_shape),
         'classes': data['groundtruth_classes'],
         'areas': data['groundtruth_area'],
         'is_crowds': tf.cast(data['groundtruth_is_crowd'], tf.int32),
     }
-    groundtruths['source_id'] = process_source_id(groundtruths['source_id'])
-    groundtruths = pad_groundtruths_to_fixed_size(
+    groundtruths['source_id'] = dataloader_utils.process_source_id(
+        groundtruths['source_id'])
+    groundtruths = dataloader_utils.pad_groundtruths_to_fixed_size(
         groundtruths, self._max_num_instances)
 
     # Packs labels for model_fn outputs.
@@ -393,14 +389,17 @@ class Parser(object):
           data['groundtruth_boxes'], image_shape)
       groundtruths = {
           'source_id': data['source_id'],
+          'height': data['height'],
+          'width': data['width'],
           'num_detections': tf.shape(data['groundtruth_classes']),
           'boxes': boxes,
           'classes': data['groundtruth_classes'],
           'areas': data['groundtruth_area'],
           'is_crowds': tf.cast(data['groundtruth_is_crowd'], tf.int32),
       }
-      groundtruths['source_id'] = process_source_id(groundtruths['source_id'])
-      groundtruths = pad_groundtruths_to_fixed_size(
+      groundtruths['source_id'] = dataloader_utils.process_source_id(
+          groundtruths['source_id'])
+      groundtruths = dataloader_utils.pad_groundtruths_to_fixed_size(
           groundtruths, self._max_num_instances)
       labels['groundtruths'] = groundtruths
 
@@ -410,10 +409,11 @@ class Parser(object):
       image_scale = image_info[2, :]
       offset = image_info[3, :]
       boxes = input_utils.resize_and_crop_boxes(
-          boxes, image_scale, (image_height, image_width), offset)
+          boxes, image_scale, image_info[1, :], offset)
       # Filters out ground truth boxes that are all zeros.
-      indices = input_utils.get_non_empty_box_indices(boxes)
+      indices = box_utils.get_non_empty_box_indices(boxes)
       boxes = tf.gather(boxes, indices)
+      classes = tf.gather(classes, indices)
 
       # Assigns anchors.
       anchor_labeler = anchor.AnchorLabeler(

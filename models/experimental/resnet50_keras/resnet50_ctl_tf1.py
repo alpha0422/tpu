@@ -45,14 +45,14 @@ flags.DEFINE_integer('num_cores', 8, 'Number of TPU cores.')
 FLAGS = flags.FLAGS
 
 # Imagenet training and test data sets.
-APPROX_IMAGENET_TRAINING_IMAGES = 1280000  # Approximate number of images.
-IMAGENET_VALIDATION_IMAGES = 50000  # Number of images.
+APPROX_IMAGENET_TRAINING_IMAGES = 1281167  # Number of images in ImageNet-1k train dataset.
+IMAGENET_VALIDATION_IMAGES = 50000  # Number of eval images.
 PER_CORE_BATCH_SIZE = 128
 NUM_CLASSES = 1000
 
 # Training hyperparameters.
 _EPOCHS = 90
-_USE_BFLOAT16 = True
+_USE_BFLOAT16 = False
 _BASE_LEARNING_RATE = 0.4
 DEFAULT_MODEL_DIR = '/tmp/resnet50'
 _WEIGHTS_TXT = 'resnet50_weights'
@@ -110,8 +110,10 @@ def main(unused_argv):
       batch_size=batch_size,
       use_bfloat16=_USE_BFLOAT16)
 
-  train_iterator = strategy.make_dataset_iterator(imagenet_train.input_fn())
-  test_iterator = strategy.make_dataset_iterator(imagenet_eval.input_fn())
+  train_iterator = strategy.experimental_distribute_dataset(
+      imagenet_train.input_fn()).make_initializable_iterator()
+  test_iterator = strategy.experimental_distribute_dataset(
+      imagenet_eval.input_fn()).make_initializable_iterator()
 
   with strategy.scope():
     logging.info('Building Keras ResNet-50 model')
@@ -130,44 +132,44 @@ def main(unused_argv):
     """Training StepFn."""
     images, labels = inputs
     with tf.GradientTape() as tape:
-      logits = model(images, training=True)
+      predictions = model(images, training=True)
 
       # Loss calculations.
       #
       # Part 1: Prediciton loss.
       prediction_loss = tf.keras.losses.sparse_categorical_crossentropy(
-          labels, logits)
+          labels, predictions)
       loss1 = tf.reduce_mean(prediction_loss)
       # Part 2: Model weights regularization
       loss2 = tf.reduce_sum(model.losses)
 
       # Scale the loss given the TPUStrategy will reduce sum all gradients.
       loss = loss1 + loss2
-      loss = loss / strategy.num_replicas_in_sync
+      scaled_loss = loss / strategy.num_replicas_in_sync
 
-    grads = tape.gradient(loss, model.trainable_variables)
+    grads = tape.gradient(scaled_loss, model.trainable_variables)
     update_vars = optimizer.apply_gradients(
         zip(grads, model.trainable_variables))
     update_loss = training_loss.update_state(loss)
-    update_accuracy = training_accuracy.update_state(labels, logits)
+    update_accuracy = training_accuracy.update_state(labels, predictions)
     with tf.control_dependencies([update_vars, update_loss, update_accuracy]):
       return tf.identity(loss)
 
   def test_step(inputs):
     """Evaluation StepFn."""
     images, labels = inputs
-    logits = model(images, training=False)
-    loss = tf.keras.losses.sparse_categorical_crossentropy(labels, logits)
-    loss = tf.reduce_mean(loss) / strategy.num_replicas_in_sync
+    predictions = model(images, training=False)
+    loss = tf.keras.losses.sparse_categorical_crossentropy(labels, predictions)
+    loss = tf.reduce_mean(loss)
     update_loss = test_loss.update_state(loss)
-    update_accuracy = test_accuracy.update_state(labels, logits)
+    update_accuracy = test_accuracy.update_state(labels, predictions)
     with tf.control_dependencies([update_loss, update_accuracy]):
       return tf.identity(loss)
 
-  dist_train = strategy.unwrap(
-      strategy.experimental_run(train_step, train_iterator))
-  dist_test = strategy.unwrap(
-      strategy.experimental_run(test_step, test_iterator))
+  dist_train = strategy.experimental_local_results(
+      strategy.experimental_run_v2(train_step, args=(next(train_iterator),)))
+  dist_test = strategy.experimental_local_results(
+      strategy.experimental_run_v2(test_step, args=(next(test_iterator),)))
 
   training_loss_result = training_loss.result()
   training_accuracy_result = training_accuracy.result()
@@ -183,9 +185,11 @@ def main(unused_argv):
   if cluster_spec:
     config.cluster_def.CopyFrom(cluster_spec.as_cluster_def())
   with tf.Session(target=resolver.master(), config=config) as sess:
-    sess.run(
-        [tf.initializers.local_variables(),
-         tf.initializers.global_variables()])
+    all_variables = (
+        tf.global_variables() +
+        training_loss.variables + training_accuracy.variables +
+        test_loss.variables + test_accuracy.variables)
+    sess.run([v.initializer for v in all_variables])
     sess.run(train_iterator_init)
 
     for epoch in range(0, FLAGS.num_epochs):

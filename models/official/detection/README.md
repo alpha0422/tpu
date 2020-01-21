@@ -5,8 +5,14 @@ To get started, make sure to use Tensorflow 1.13+ on Google Cloud. Also here are
 
 ```bash
 sudo apt-get install -y python-tk && \
-pip install Cython matplotlib opencv-python-headless pyyaml Pillow && \
-pip install 'git+https://github.com/cocodataset/cocoapi#egg=pycocotools&subdirectory=PythonAPI'
+pip install --user Cython matplotlib opencv-python-headless pyyaml Pillow && \
+pip install --user 'git+https://github.com/cocodataset/cocoapi#egg=pycocotools&subdirectory=PythonAPI'
+```
+
+Next, download the code from tpu github repository or use the pre-installed Google Cloud VM.
+
+```bash
+git clone https://github.com/tensorflow/tpu/
 ```
 
 ## Train RetinaNet on TPU
@@ -26,7 +32,7 @@ python ~/tpu/models/official/detection/main.py \
   --model_dir="${MODEL_DIR?}" \
   --mode=train \
   --eval_after_training=True \
-  --params_overrides="{ type: retinanet, train: { checkpoint: { path: ${RESNET_CHECKPOINT?}, prefix: resnet50/ }, train_file_pattern: ${TRAIN_FILE_PATTERN?} }, eval: { val_json_file: ${VAL_JSON_FILE?}, eval_file_pattern: ${EVAL_FILE_PATTERN?} } }"
+  --params_override="{ type: retinanet, train: { checkpoint: { path: ${RESNET_CHECKPOINT?}, prefix: resnet50/ }, train_file_pattern: ${TRAIN_FILE_PATTERN?} }, eval: { val_json_file: ${VAL_JSON_FILE?}, eval_file_pattern: ${EVAL_FILE_PATTERN?} } }"
 ```
 
 ### Train a custom RetinaNet using the config file.
@@ -61,7 +67,7 @@ python ~/tpu/models/official/detection/main.py \
 ### Available RetinaNet templates.
 
 * NAS-FPN: [arXiv](https://arxiv.org/abs/1904.07392), [yaml](https://github.com/tensorflow/tpu/blob/master/models/official/detection/configs/yaml/retinanet_nasfpn.yaml)
-* Auto-augument: arXiv, [yaml](https://github.com/tensorflow/tpu/blob/master/models/official/detection/configs/yaml/retinanet_autoaugment.yaml)
+* Auto-augument: [arXiv](https://arxiv.org/abs/1805.09501), [yaml](https://github.com/tensorflow/tpu/blob/master/models/official/detection/configs/yaml/retinanet_autoaugment.yaml)
 
 
 ## Export to SavedModel for serving

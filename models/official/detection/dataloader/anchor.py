@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +20,9 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-import tensorflow as tf
+from six.moves import range
+import tensorflow.compat.v1 as tf
+
 from utils.object_detection import argmax_matcher
 from utils.object_detection import balanced_positive_negative_sampler
 from utils.object_detection import box_list
@@ -46,7 +49,7 @@ class Anchor(object):
       num_scales: integer number representing intermediate scales added
         on each level. For instances, num_scales=2 adds one additional
         intermediate anchor scales [2^0, 2^0.5] on each level.
-      aspect_ratios: list of float numbers representing the aspect raito anchors
+      aspect_ratios: list of float numbers representing the aspect ratio anchors
         added on each level. The number indicates the ratio of width to height.
         For instances, aspect_ratios=[1.0, 2.0, 0.5] adds three anchors on each
         scale level.
@@ -68,7 +71,7 @@ class Anchor(object):
     """Generates multiscale anchor boxes.
 
     Returns:
-      a Tensor of shape [N, 4], represneting anchor boxes of all levels
+      a Tensor of shape [N, 4], representing anchor boxes of all levels
       concatenated together.
     """
     boxes_all = []
@@ -204,10 +207,15 @@ class AnchorLabeler(object):
 class RpnAnchorLabeler(AnchorLabeler):
   """Labeler for Region Proposal Network."""
 
-  def __init__(self, anchor, match_threshold=0.7,
-               unmatched_threshold=0.3, rpn_batch_size_per_im=256,
+  def __init__(self,
+               anchor,
+               match_threshold=0.7,
+               unmatched_threshold=0.3,
+               rpn_batch_size_per_im=256,
                rpn_fg_fraction=0.5):
-    AnchorLabeler.__init__(self, anchor, match_threshold=0.7,
+    AnchorLabeler.__init__(self,
+                           anchor,
+                           match_threshold=0.7,
                            unmatched_threshold=0.3)
     self._rpn_batch_size_per_im = rpn_batch_size_per_im
     self._rpn_fg_fraction = rpn_fg_fraction

@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,7 +35,7 @@ Some other notes:
   * Tensors are always provided as (flat) [N, 4] tensors.
 """
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 
 class BoxList(object):
@@ -73,11 +74,11 @@ class BoxList(object):
       Number of boxes held in collection (integer) or None if this is not
         inferrable at graph construction time.
     """
-    return self.data['boxes'].get_shape()[0].value
+    return self.data['boxes'].get_shape().dims[0].value
 
   def get_all_fields(self):
     """Returns all fields."""
-    return self.data.keys()
+    return list(self.data.keys())
 
   def get_extra_fields(self):
     """Returns all non-box fields (i.e., everything not named 'boxes')."""

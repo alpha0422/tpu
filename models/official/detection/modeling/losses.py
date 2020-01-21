@@ -18,7 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 
 def focal_loss(logits, targets, alpha, gamma, normalizer):
@@ -36,6 +36,7 @@ def focal_loss(logits, targets, alpha, gamma, normalizer):
       and (1-alpha) to the loss from negative examples.
     gamma: A float32 scalar modulating loss from hard and easy examples.
     normalizer: A float32 scalar normalizes the total loss from all examples.
+
   Returns:
     loss: A float32 Tensor of size [batch, height_in, width_in, num_predictions]
       representing normalized loss on the prediction map.
@@ -87,18 +88,19 @@ class RpnScoreLoss(object):
   """Region Proposal Network score loss function."""
 
   def __init__(self, params):
-    self._batch_size = params.batch_size
     self._rpn_batch_size_per_im = params.rpn_batch_size_per_im
 
   def __call__(self, score_outputs, labels):
     """Computes total RPN detection loss.
 
     Computes total RPN detection loss including box and score from all levels.
+
     Args:
       score_outputs: an OrderDict with keys representing levels and values
         representing scores in [batch_size, height, width, num_anchors].
       labels: the dictionary that returned from dataloader that includes
         groundturth targets.
+
     Returns:
       rpn_score_loss: a scalar tensor representing total score loss.
     """
@@ -107,13 +109,13 @@ class RpnScoreLoss(object):
 
       score_losses = []
       for level in levels:
-        score_targets_l = labels['score_targets_%d' % level]
         score_losses.append(
             self._rpn_score_loss(
                 score_outputs[level],
-                score_targets_l,
-                normalizer=tf.to_float(
-                    self._batch_size * self._rpn_batch_size_per_im)))
+                labels[level],
+                normalizer=tf.cast(
+                    tf.shape(score_outputs[level])[0] *
+                    self._rpn_batch_size_per_im, dtype=tf.float32)))
 
       # Sums per level losses to total loss.
       return tf.add_n(score_losses)
@@ -146,12 +148,14 @@ class RpnBoxLoss(object):
     """Computes total RPN detection loss.
 
     Computes total RPN detection loss including box and score from all levels.
+
     Args:
       box_outputs: an OrderDict with keys representing levels and values
         representing box regression targets in
         [batch_size, height, width, num_anchors * 4].
       labels: the dictionary that returned from dataloader that includes
         groundturth targets.
+
     Returns:
       rpn_box_loss: a scalar tensor representing total box regression loss.
     """
@@ -160,10 +164,9 @@ class RpnBoxLoss(object):
 
       box_losses = []
       for level in levels:
-        box_targets_l = labels['box_targets_%d' % level]
         box_losses.append(
             self._rpn_box_loss(
-                box_outputs[level], box_targets_l, delta=self._delta))
+                box_outputs[level], labels[level], delta=self._delta))
 
       # Sum per level losses to total loss.
       return tf.add_n(box_losses)
@@ -203,11 +206,12 @@ class FastrcnnClassLoss(object):
         with a shape of [batch_size, num_boxes, num_classes].
       class_targets: a float tensor representing the class label for each box
         with a shape of [batch_size, num_boxes].
+
     Returns:
       a scalar tensor representing total class loss.
     """
     with tf.name_scope('fast_rcnn_loss'):
-      _, _, _, num_classes = class_outputs.get_shape().as_list()
+      _, _, num_classes = class_outputs.get_shape().as_list()
       class_targets = tf.to_int32(class_targets)
       class_targets_one_hot = tf.one_hot(class_targets, num_classes)
       return self._fast_rcnn_class_loss(class_outputs, class_targets_one_hot)
@@ -251,6 +255,7 @@ class FastrcnnBoxLoss(object):
         with a shape of [batch_size, num_boxes].
       box_targets: a float tensor representing the box label for each box
         with a shape of [batch_size, num_boxes, 4].
+
     Returns:
       box_loss: a scalar tensor representing total box regression loss.
     """
@@ -327,10 +332,11 @@ class MaskrcnnLoss(object):
         [batch_size, num_masks, mask_height, mask_width].
       select_class_targets: a tensor with a shape of [batch_size, num_masks],
         representing the foreground mask targets.
+
     Returns:
       mask_loss: a float tensor representing total mask loss.
     """
-    with tf.name_scope('mask_loss'):
+    with tf.name_scope('mask_rcnn_loss'):
       (batch_size, num_masks, mask_height,
        mask_width) = mask_outputs.get_shape().as_list()
 
@@ -355,6 +361,7 @@ class RetinanetClassLoss(object):
     """Computes total detection loss.
 
     Computes total detection loss including box and class loss from all levels.
+
     Args:
       cls_outputs: an OrderDict with keys representing levels and values
         representing logits in [batch_size, height, width,
@@ -408,6 +415,7 @@ class RetinanetBoxLoss(object):
     """Computes box detection loss.
 
     Computes total detection loss including box and class loss from all levels.
+
     Args:
       box_outputs: an OrderDict with keys representing levels and values
         representing box regression targets in [batch_size, height, width,
@@ -449,55 +457,85 @@ class RetinanetBoxLoss(object):
     return box_loss
 
 
-class ShapeMaskLoss(object):
-  """ShapeMask mask loss function wrapper."""
+class ShapemaskMseLoss(object):
+  """ShapeMask mask Mean Squared Error loss function wrapper."""
 
-  def __call__(self, logits, scaled_labels, classes,
-               category_loss=True, mse_loss=False):
+  def __call__(self, probs, labels, valid_mask):
     """Compute instance segmentation loss.
 
     Args:
-      logits: A Tensor of shape [batch_size * num_points, height, width,
+      probs: A Tensor of shape [batch_size * num_points, height, width,
         num_classes]. The logits are not necessarily between 0 and 1.
-      scaled_labels: A float16 Tensor of shape [batch_size, num_instances,
+      labels: A float16 Tensor of shape [batch_size, num_instances,
           mask_size, mask_size], where mask_size =
           mask_crop_size * gt_upsample_scale for fine mask, or mask_crop_size
           for coarse masks and shape priors.
-      classes: A int tensor of shape [batch_size, num_instances].
-      category_loss: use class specific mask prediction or not.
-      mse_loss: use mean square error for mask loss or not
+      valid_mask: a binary mask indicating valid training masks.
 
     Returns:
-      mask_loss: an float tensor representing total mask classification loss.
-      iou: a float tensor representing the IoU between target and prediction.
+      loss: an float tensor representing total mask classification loss.
     """
-    classes = tf.reshape(classes, [-1])
-    _, _, height, width = scaled_labels.get_shape().as_list()
-    scaled_labels = tf.reshape(scaled_labels, [-1, height, width])
+    with tf.name_scope('shapemask_prior_loss'):
+      batch_size, num_instances = valid_mask.get_shape().as_list()[:2]
+      diff = labels - probs
+      diff *= tf.cast(tf.reshape(
+          valid_mask, [batch_size, num_instances, 1, 1]), diff.dtype)
+      loss = tf.nn.l2_loss(diff) / tf.reduce_sum(labels)
+    return loss
 
-    if not category_loss:
-      logits = logits[:, :, :, 0]
-    else:
-      logits = tf.transpose(logits, (0, 3, 1, 2))
-      gather_idx = tf.stack([tf.range(tf.size(classes)), classes - 1], axis=1)
-      logits = tf.gather_nd(logits, gather_idx)
 
-    # Ignore loss on empty mask targets.
-    valid_labels = tf.reduce_any(tf.greater(scaled_labels, 0), axis=[1, 2])
-    if mse_loss:
-      # Logits are probabilities in the case of shape prior prediction.
-      logits *= tf.reshape(
-          tf.cast(valid_labels, logits.dtype), [-1, 1, 1])
-      weighted_loss = tf.nn.l2_loss(scaled_labels - logits)
-      probs = logits
-    else:
-      weighted_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-          labels=scaled_labels, logits=logits)
-      probs = tf.sigmoid(logits)
-      weighted_loss *= tf.reshape(
-          tf.cast(valid_labels, weighted_loss.dtype), [-1, 1, 1])
+class ShapemaskLoss(object):
+  """ShapeMask mask loss function wrapper."""
 
-    iou = tf.reduce_sum(tf.minimum(scaled_labels, probs)) / tf.reduce_sum(
-        tf.maximum(scaled_labels, probs))
-    mask_loss = tf.reduce_sum(weighted_loss) / tf.reduce_sum(scaled_labels)
-    return tf.cast(mask_loss, tf.float32), tf.cast(iou, tf.float32)
+  def __call__(self, logits, labels, valid_mask):
+    """ShapeMask mask cross entropy loss function wrapper.
+
+    Args:
+      logits: A Tensor of shape [batch_size * num_instances, height, width,
+        num_classes]. The logits are not necessarily between 0 and 1.
+      labels: A float16 Tensor of shape [batch_size, num_instances,
+        mask_size, mask_size], where mask_size =
+        mask_crop_size * gt_upsample_scale for fine mask, or mask_crop_size
+        for coarse masks and shape priors.
+      valid_mask: a binary mask of shape [batch_size, num_instances]
+        indicating valid training masks.
+    Returns:
+      loss: an float tensor representing total mask classification loss.
+    """
+    with tf.name_scope('shapemask_loss'):
+      batch_size, num_instances = valid_mask.get_shape().as_list()[:2]
+      loss = tf.nn.sigmoid_cross_entropy_with_logits(
+          labels=labels, logits=logits)
+      loss *= tf.cast(tf.reshape(
+          valid_mask, [batch_size, num_instances, 1, 1]), loss.dtype)
+      loss = tf.reduce_sum(loss) / tf.reduce_sum(labels)
+    return loss
+
+
+class SegmentationLoss(object):
+  """Semantic segmentationloss function."""
+
+  def __init__(self, params):
+    self._ignore_label = params.ignore_label
+
+  def __call__(self, logits, labels):
+    _, height, width, _ = logits.get_shape().as_list()
+    # Use bilinear resizing because nearest neighbor is not supported in
+    # tensorflow 1.14 with TPU. Once the environment is updated, it should be
+    # change back to nearest neighbor. For now, it is tested and the performance
+    # should be similar.
+    labels = tf.image.resize_images(
+        labels, (height, width), method=tf.image.ResizeMethod.BILINEAR)
+    valid_mask = tf.not_equal(labels, self._ignore_label)
+    normalizer = tf.reduce_sum(tf.to_float(valid_mask))
+    # Assign pixel with ignore label to class 0 (background). The loss on the
+    # pixel will later be masked out.
+    labels = tf.where(valid_mask, labels, tf.zeros_like(labels))
+
+    labels = tf.squeeze(tf.cast(labels, tf.int32), axis=3)
+    valid_mask = tf.squeeze(tf.cast(valid_mask, tf.float32), axis=3)
+    cross_entropy_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+        labels=labels, logits=logits)
+    cross_entropy_loss *= tf.to_float(valid_mask)
+    loss = tf.reduce_sum(cross_entropy_loss) / normalizer
+    return loss

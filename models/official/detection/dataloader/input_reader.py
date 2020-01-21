@@ -14,7 +14,7 @@
 # ==============================================================================
 """Data loader and input processing."""
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from dataloader import factory
 from dataloader import mode_keys as ModeKeys
@@ -23,12 +23,20 @@ from dataloader import mode_keys as ModeKeys
 class InputFn(object):
   """Input function for tf.Estimator."""
 
-  def __init__(self, file_pattern, params, mode):
+  def __init__(self, file_pattern, params, mode, dataset_type='tfrecord'):
     self._file_pattern = file_pattern
     self._mode = mode
     self._is_training = (mode == ModeKeys.TRAIN)
-    self._parser_fn = factory.parser_generator(params, mode)
-    self._dataset_fn = tf.data.TFRecordDataset
+    if dataset_type == 'tfrecord':
+      self._dataset_fn = tf.data.TFRecordDataset
+      self._parser_fn = factory.parser_generator(params, mode)
+    else:
+      raise ValueError('Dataset type %s is not supported.' % dataset_type)
+
+    try:
+      self._transpose_input = params.train.transpose_input
+    except KeyError:
+      self._transpose_input = False
 
   def __call__(self, params):
     batch_size = params['batch_size']
@@ -48,7 +56,21 @@ class InputFn(object):
       dataset = dataset.shuffle(64)
 
     # Parses the fetched records to input tensors for model function.
-    dataset = dataset.map(self._parser_fn, num_parallel_calls=64)
-    dataset = dataset.prefetch(tf.contrib.data.AUTOTUNE)
-    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.apply(
+        tf.data.experimental.map_and_batch(
+            self._parser_fn,
+            batch_size=batch_size,
+            num_parallel_batches=64,
+            drop_remainder=True))
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+
+    # Transpose the input images from [N,H,W,C] to [H,W,C,N] since reshape on
+    # TPU is expensive.
+    if self._transpose_input and self._is_training:
+
+      def _transpose_images(images, labels):
+        return tf.transpose(images, [1, 2, 3, 0]), labels
+
+      dataset = dataset.map(_transpose_images, num_parallel_calls=64)
+
     return dataset

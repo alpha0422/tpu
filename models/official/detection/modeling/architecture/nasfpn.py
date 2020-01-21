@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,13 +24,16 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
 import enum
-import tensorflow as tf
+import functools
 
+from absl import logging
+from six.moves import range
+from six.moves import zip
+import tensorflow.compat.v1 as tf
 
 from modeling.architecture import nn_ops
-from utils import spatial_transform
+from ops import spatial_transform_ops
 
 
 COMBINATION_OPS = enum.Enum('COMBINATION_OPS', ['SUM', 'GLOBAL_ATTENTION'])
@@ -38,13 +42,14 @@ NODE_TYPES = enum.Enum('NODE_TYPES', ['INTERMEDIATE', 'OUTPUT'])
 
 def resample_feature_map(feat, level, target_level, is_training,
                          target_feat_dims=256,
+                         conv2d_op=tf.layers.conv2d,
                          batch_norm_relu=nn_ops.BatchNormRelu(),
                          name=None):
   """Resample input feature map to have target number of channels and width."""
   feat_dims = feat.get_shape().as_list()[3]
   with tf.variable_scope('resample_{}'.format(name)):
     if feat_dims != target_feat_dims:
-      feat = tf.layers.conv2d(
+      feat = conv2d_op(
           feat, filters=target_feat_dims, kernel_size=(1, 1), padding='same')
       feat = batch_norm_relu(
           feat,
@@ -60,7 +65,7 @@ def resample_feature_map(feat, level, target_level, is_training,
           padding='SAME')
     elif level > target_level:
       scale = int(2**(level - target_level))
-      feat = spatial_transform.nearest_upsampling(feat, scale=scale)
+      feat = spatial_transform_ops.nearest_upsampling(feat, scale=scale)
   return feat
 
 
@@ -86,7 +91,7 @@ class Config(object):
                        'divisible by 4.'.format(len(config)))
     num_nodes = int(len(config) / 4)
     num_output_nodes = self.max_level - self.min_level + 1
-    levels = range(self.max_level, self.min_level - 1, -1)
+    levels = list(range(self.max_level, self.min_level - 1, -1))
 
     nodes = []
     for i in range(num_nodes):
@@ -147,12 +152,18 @@ class Nasfpn(object):
     self._config = Config(model_config, self._min_level, self._max_level)
     self._num_repeats = num_repeats
     self._fpn_feat_dims = fpn_feat_dims
-    self._use_separable_conv = use_separable_conv
+    if use_separable_conv:
+      self._conv2d_op = functools.partial(
+          tf.layers.separable_conv2d, depth_multiplier=1)
+    else:
+      self._conv2d_op = tf.layers.conv2d
     self._dropblock = dropblock
     self._batch_norm_relu = batch_norm_relu
     self._resample_feature_map = functools.partial(
         resample_feature_map,
-        target_feat_dims=fpn_feat_dims, batch_norm_relu=batch_norm_relu)
+        target_feat_dims=fpn_feat_dims,
+        conv2d_op=self._conv2d_op,
+        batch_norm_relu=batch_norm_relu)
 
   def __call__(self, multilevel_features, is_training=False):
     """Returns the FPN features for a given multilevel features.
@@ -170,7 +181,7 @@ class Nasfpn(object):
     """
     feats = []
     for level in range(self._min_level, self._max_level + 1):
-      if level in multilevel_features.keys():
+      if level in list(multilevel_features.keys()):
         # TODO(tsungyi): The original impl. does't downsample the backbone feat.
         feats.append(self._resample_feature_map(
             multilevel_features[level], level, level, is_training,
@@ -183,7 +194,7 @@ class Nasfpn(object):
     with tf.variable_scope('fpn_cells'):
       for i in range(self._num_repeats):
         with tf.variable_scope('cell_{}'.format(i)):
-          tf.logging.info('building cell {}'.format(i))
+          logging.info('building cell %s', i)
           feats_dict = self._build_feature_pyramid(feats, is_training)
           feats = [feats_dict[level] for level in range(
               self._min_level, self._max_level + 1)]
@@ -194,11 +205,11 @@ class Nasfpn(object):
     # Number of output connections from each feat.
     num_output_connections = [0] * len(feats)
     num_output_levels = self._max_level - self._min_level + 1
-    feat_levels = range(self._min_level, self._max_level + 1)
+    feat_levels = list(range(self._min_level, self._max_level + 1))
 
     for i, sub_policy in enumerate(self._config.nodes):
       with tf.variable_scope('sub_policy{}'.format(i)):
-        tf.logging.info('sub_policy {} : {}'.format(i, sub_policy))
+        logging.info('sub_policy %d : %s', i, sub_policy)
         new_level = sub_policy['level']
 
         # Checks the range of input_offsets.
@@ -247,12 +258,7 @@ class Nasfpn(object):
         with tf.variable_scope('op_after_combine{}'.format(len(feats))):
           # ReLU -> Conv -> BN after binary op.
           new_node = tf.nn.relu(new_node)
-          if self._use_separable_conv:
-            conv_op = functools.partial(
-                tf.layers.separable_conv2d, depth_multiplier=1)
-          else:
-            conv_op = tf.layers.conv2d
-          new_node = conv_op(
+          new_node = self._conv2d_op(
               new_node,
               filters=self._fpn_feat_dims,
               kernel_size=(3, 3),
@@ -271,6 +277,5 @@ class Nasfpn(object):
     for i in range(len(feats) - num_output_levels, len(feats)):
       level = feat_levels[i]
       output_feats[level] = feats[i]
-    tf.logging.info('Output feature pyramid: {}'.format(output_feats))
+    logging.info('Output feature pyramid: %s', output_feats)
     return output_feats
-

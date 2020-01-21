@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,24 +23,50 @@ import abc
 import functools
 import re
 import six
-import tensorflow as tf
+from six.moves import zip
+import tensorflow.compat.v1 as tf
+import tensorflow.compat.v2 as tf2
+
+from modeling import learning_rates
+from utils import benchmark_utils
 
 
-def filter_trainable_variables(variables, frozen_variable_prefix):
-  """Filter trainable varialbes.
+def filter_variables(variables, variable_regex, is_whitelist):
+  """Filter a list of variables based on the regex.
 
   Args:
     variables: a list of tf.Variable to be filtered.
-    frozen_variable_prefix: a regex string specifing the prefix pattern of
-      the frozen variables' names.
+    variable_regex: a regex specifying the filtering rule.
+    is_whitelist: a bool. If True, indicate `variable_regex` specifies the
+      variables to keep. If False, indicate `variable_regex` specfieis the
+      variables to discard.
 
   Returns:
-    filtered_variables: a list of tf.Variable filtered out the frozen ones.
+    filtered_variables: a list of tf.Variable after filtering.
   """
-  filtered_variables = [
-      v for v in variables if not re.match(frozen_variable_prefix, v.name)
-  ]
+  if is_whitelist:
+    filtered_variables = [
+        v for v in variables if variable_regex is None or
+        re.match(variable_regex, v.name)
+    ]
+  else:
+    filtered_variables = [
+        v for v in variables if variable_regex is None or
+        not re.match(variable_regex, v.name)
+    ]
   return filtered_variables
+
+
+def filter_trainable_variables(variables, frozen_variable_prefix):
+  """Filter and retrun trainable variables."""
+  return filter_variables(
+      variables, frozen_variable_prefix, is_whitelist=False)
+
+
+def filter_regularization_variables(variables, regularization_variable_regex):
+  """Filter and return regularization variables."""
+  return filter_variables(
+      variables, regularization_variable_regex, is_whitelist=True)
 
 
 class OptimizerFactory(object):
@@ -66,41 +93,24 @@ class OptimizerFactory(object):
     return self._optimizer(learning_rate)
 
 
-class LearningRateFactory(object):
-  """Class to generate learning rate tensor."""
-
-  def __init__(self, params):
-    """Creates the step learning rate tensor with linear warmup."""
-    self._params = params
-
-  def __call__(self, global_step):
-    linear_warmup = (
-        self._params.warmup_learning_rate +
-        tf.cast(global_step, dtype=tf.float32) / self._params.warmup_steps *
-        (self._params.init_learning_rate - self._params.warmup_learning_rate))
-    learning_rate = tf.where(global_step < self._params.warmup_steps,
-                             linear_warmup, self._params.init_learning_rate)
-
-    for next_learning_rate, start_step in zip(self._params.learning_rate_levels,
-                                              self._params.learning_rate_steps):
-      learning_rate = tf.where(global_step >= start_step,
-                               next_learning_rate, learning_rate)
-    return learning_rate
-
-
-class Model(object):
+class Model(six.with_metaclass(abc.ABCMeta, object)):
   """Base class for model function."""
-
-  __metaclass__ = abc.ABCMeta
 
   def __init__(self, params):
     self._use_bfloat16 = params.architecture.use_bfloat16
 
+    self._l2_weight_decay = params.train.l2_weight_decay
+
     # Optimization.
     self._optimizer_fn = OptimizerFactory(params.train.optimizer)
-    self._learning_rate_fn = LearningRateFactory(params.train.learning_rate)
+    self._learning_rate_fn = learning_rates.learning_rate_generator(
+        params.train.learning_rate, params.train.total_steps)
 
-    self._frozen_variable_prefix = params.train.frozen_variable_prefix
+    self._gradient_clip_norm = params.train.gradient_clip_norm
+
+    self._frozen_var_prefix = params.train.frozen_variable_prefix
+
+    self._regularization_var_regex = params.train.regularization_variable_regex
 
     # Checkpoint restoration.
     self._checkpoint = params.train.checkpoint.path
@@ -109,6 +119,7 @@ class Model(object):
     # Summary.
     self._enable_summary = params.enable_summary
     self._summaries = {}
+    self._image_summaries = {}
     self._model_dir = params.model_dir
     self._iterations_per_loop = params.train.iterations_per_loop
 
@@ -120,10 +131,15 @@ class Model(object):
     """Build the graph of the forward path."""
     pass
 
+  def _log_model_statistics(self, batched_input):
+    batch_size, _, _, _ = batched_input.get_shape().as_list()
+    _, _ = benchmark_utils.compute_model_statistics(
+        batch_size)
+
   def model_outputs(self, features, labels, mode):
     """Build the model outputs."""
     if self._use_bfloat16:
-      with tf.contrib.tpu.bfloat16_scope():
+      with tf.tpu.bfloat16_scope():
         def cast_outputs_to_float(d):
           for k, v in sorted(six.iteritems(d)):
             if isinstance(v, dict):
@@ -153,8 +169,8 @@ class Model(object):
     """Given features and labels, returns a TPUEstimatorSpec for prediction."""
     pass
 
-  def optimize(self, total_loss):
-    """Returns train_op to optimize total loss."""
+  def optimize(self, model_loss):
+    """Returns total_loss and train_op for optimization."""
     global_step = tf.train.get_global_step()
     learning_rate = self._learning_rate_fn(global_step)
     self.add_scalar_summary('learning_rate', learning_rate)
@@ -162,26 +178,35 @@ class Model(object):
     # Sets up the optimizer.
     optimizer = self._optimizer_fn(learning_rate)
     if self._use_tpu:
-      optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
+      optimizer = tf.tpu.CrossShardOptimizer(optimizer)
 
     # Batch norm requires update_ops to be added as a train_op dependency.
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
     # Gets all trainable variables and apply the variable filter.
     train_var_list = filter_trainable_variables(
-        tf.trainable_variables(), self._frozen_variable_prefix)
+        tf.trainable_variables(), self._frozen_var_prefix)
+
+    # Gets the regularization variables and apply the regularization loss.
+    regularization_var_list = filter_regularization_variables(
+        train_var_list, self._regularization_var_regex)
+    l2_regularization_loss = self._l2_weight_decay * tf.add_n([
+        tf.nn.l2_loss(v) for v in regularization_var_list])
+
+    self.add_scalar_summary('l2_regularization_loss', l2_regularization_loss)
+
+    total_loss = model_loss + l2_regularization_loss
+
+    grads_and_vars = optimizer.compute_gradients(total_loss, train_var_list)
+    if self._gradient_clip_norm > 0.0:
+      grads = [gv[0] for gv in grads_and_vars]
+      tvars = [gv[1] for gv in grads_and_vars]
+      clipped_grads, _ = tf.clip_by_global_norm(grads, self._gradient_clip_norm)
+      grads_and_vars = list(zip(clipped_grads, tvars))
 
     with tf.control_dependencies(update_ops):
-      train_op = optimizer.minimize(
-          total_loss, global_step, var_list=train_var_list)
-    return train_op
-
-  def weight_decay_loss(self, l2_weight_decay):
-    return l2_weight_decay * tf.add_n([
-        tf.nn.l2_loss(v)
-        for v in tf.trainable_variables()
-        if 'batch_normalization' not in v.name
-    ])
+      minimize_op = optimizer.apply_gradients(grads_and_vars, global_step)
+    return total_loss, minimize_op
 
   def restore_from_checkpoint(self):
     """Returns scaffold function to restore parameters from checkpoint."""
@@ -203,23 +228,27 @@ class Model(object):
       Returns:
         List of summary ops to run on the CPU host.
       """
-      global_step, summaries = tf.nest.pack_sequence_as(
+      global_step, summaries, image_summaries = tf.nest.pack_sequence_as(
           host_call_inputs, flat_args)
       global_step = tf.reduce_mean(global_step)
-      with (tf.contrib.summary.create_file_writer(
+      with (tf2.summary.create_file_writer(
           self._model_dir,
           max_queue=self._iterations_per_loop).as_default()):
-        with tf.contrib.summary.always_record_summaries():
+        with tf2.summary.record_if(True):
           for key, value in summaries.items():
-            tf.contrib.summary.scalar(key, tf.reduce_mean(value),
-                                      step=global_step)
-          return tf.contrib.summary.all_summary_ops()
+            tf2.summary.scalar(key, tf.reduce_mean(value), step=global_step)
+          for key, value in image_summaries.items():
+            tf2.summary.image(key, value, step=global_step)
+          return tf.summary.all_v2_summary_ops()
     global_step = tf.reshape(tf.train.get_global_step()[None], [1])
-    host_call_inputs = [global_step, self.summaries]
+    host_call_inputs = [global_step, self.summaries, self._image_summaries]
     return (host_call_fn, tf.nest.flatten(host_call_inputs))
 
   def add_scalar_summary(self, name, tensor):
     self._summaries[name] = tf.reshape(tensor, [1])
+
+  def add_image_summary(self, name, tensor):
+    self._image_summaries[name] = tensor
 
   @property
   def summaries(self):

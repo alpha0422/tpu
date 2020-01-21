@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,12 @@
 # ==============================================================================
 """Input and model functions for serving/inference."""
 
-import tensorflow as tf
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+from six.moves import range
+import tensorflow.compat.v1 as tf
 
 from dataloader import anchor
 from dataloader import mode_keys
@@ -168,8 +174,6 @@ def serving_input_fn(batch_size,
                      input_name='input'):
   """Input function for SavedModels and TF serving.
 
-  Returns a `tf.estimator.export.ServingInputReceiver` for a SavedModel.
-
   Args:
     batch_size: The batch size.
     desired_image_size: The tuple/list of two integers, specifying the desired
@@ -180,6 +184,9 @@ def serving_input_fn(batch_size,
     input_type: a string of 'image_tensor', 'image_bytes' or 'tf_example',
       specifying which type of input will be used in serving.
     input_name: a string to specify the name of the input signature.
+
+  Returns:
+    a `tf.estimator.export.ServingInputReceiver` for a SavedModel.
   """
   if input_type == 'image_tensor':
     placeholder, features = image_tensor_input(
@@ -308,12 +315,26 @@ def serving_model_fn_builder(export_tpu_model,
         'detection_scores': tf.identity(
             model_outputs['detection_scores'], 'DetectionScores'),
     }
+    if 'detection_masks' in model_outputs:
+      predictions.update({
+          'detection_masks':
+              tf.identity(model_outputs['detection_masks'], 'DetectionMasks'),
+      })
+
+    if 'detection_outer_boxes' in model_outputs:
+      predictions.update({
+          'detection_outer_boxes':
+              tf.identity(model_outputs['detection_outer_boxes'],
+                          'DetectionOuterBoxes'),
+      })
+
     if output_image_info:
       predictions['image_info'] = tf.identity(
           model_outputs['image_info'], 'ImageInfo')
 
     if export_tpu_model:
-      return tf.contrib.tpu.TPUEstimatorSpec(mode=mode, predictions=predictions)
+      return tf.estimator.tpu.TPUEstimatorSpec(mode=mode,
+                                               predictions=predictions)
     return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 
   return _serving_model_fn

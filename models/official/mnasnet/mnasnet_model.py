@@ -27,9 +27,9 @@ import collections
 import numpy as np
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
-import legacy_layers
+import mnas_utils
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
@@ -209,7 +209,7 @@ class MnasBlock(object):
           data_format=self._data_format,
           use_bias=False)
     else:
-      self._depthwise_conv = legacy_layers.DepthwiseConv2D(
+      self._depthwise_conv = mnas_utils.DepthwiseConv2D(
           [kernel_size, kernel_size],
           strides=self._block_args.strides,
           depthwise_initializer=conv_kernel_initializer,
@@ -310,7 +310,7 @@ class MnasBlock(object):
       ) and self._block_args.input_filters == self._block_args.output_filters:
         x = tf.add(x, inputs)
     tf.logging.info('Project: %s shape: %s' % (x.name, x.shape))
-    return x
+    return tf.identity(x)
 
 
 class MnasNetModel(tf.keras.Model):

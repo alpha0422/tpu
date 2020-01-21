@@ -27,12 +27,11 @@ from __future__ import print_function
 
 import functools
 from absl import flags
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
-from configs import retinanet_config
+from configs import factory
 from modeling import serving
 from hyperparameters import params_dict
-from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 FLAGS = flags.FLAGS
 
@@ -40,6 +39,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('export_dir', None, 'The export directory.')
 flags.DEFINE_string('checkpoint_path', None, 'Checkpoint path.')
 flags.DEFINE_boolean('use_tpu', False, 'Whether or not use TPU.')
+flags.DEFINE_string('model', 'retinanet', 'Model to run: Currently only support `retinanet`.')
 flags.DEFINE_string('params_override', '', 'The model parameters to override.')
 flags.DEFINE_integer('batch_size', 1, 'The batch size.')
 flags.DEFINE_string('input_type', 'image_bytes', 'One of `raw_image_tensor`, `image_tensor`, `image_bytes` and `tf_example`.')
@@ -57,8 +57,7 @@ flags.mark_flag_as_required('checkpoint_path')
 def main(argv):
   del argv  # Unused.
 
-  params = params_dict.ParamsDict(
-      retinanet_config.RETINANET_CFG, retinanet_config.RETINANET_RESTRICTIONS)
+  params = factory.config_generator(FLAGS.model)
   params = params_dict.override_params_dict(
       params, FLAGS.params_override, is_strict=True)
   params.validate()
@@ -71,15 +70,16 @@ def main(argv):
       transpose_input=False)
 
   print(' - Setting up TPUEstimator...')
-  estimator = tf.contrib.tpu.TPUEstimator(
+  estimator = tf.estimator.tpu.TPUEstimator(
       model_fn=serving.serving_model_fn_builder(
           FLAGS.use_tpu,
           FLAGS.output_image_info,
           FLAGS.output_normalized_coordinates,
           FLAGS.cast_num_detections_to_float),
       model_dir=None,
-      config=tpu_config.RunConfig(
-          tpu_config=tpu_config.TPUConfig(iterations_per_loop=1),
+      config=tf.estimator.tpu.RunConfig(
+          tpu_config=tf.estimator.tpu.TPUConfig(
+              iterations_per_loop=1),
           master='local',
           evaluation_master='local'),
       params=model_params,

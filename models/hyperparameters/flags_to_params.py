@@ -14,7 +14,7 @@
 # ==============================================================================
 """Functions to override model parameters from command-line flags."""
 
-import tensorflow as tf
+from absl import logging
 from hyperparameters import params_dict
 
 ESSENTIAL_FLAGS = ['tpu', 'data_dir', 'model_dir']
@@ -41,7 +41,7 @@ def override_params_from_input_flags(params, input_flags):
     flag_value = input_flags.get_flag_value(key, None)
 
     if flag_value is None:
-      tf.logging.warning('Flag {} is None.'.format(key))
+      logging.warning('Flag %s is None.', key)
     else:
       essential_flag_dict[key] = flag_value
 
@@ -78,9 +78,11 @@ def get_dictionary_from_flags(params, input_flags):
       d = get_dictionary_from_flags(v, input_flags)
       flag_dict[k] = d
     else:
-      flag_value = input_flags.get_flag_value(k, None)
-
-      if flag_value is not None:
-        flag_dict[k] = flag_value
+      try:
+        flag_value = input_flags.get_flag_value(k, None)
+        if flag_value is not None:
+          flag_dict[k] = flag_value
+      except AttributeError:
+        flag_dict[k] = v
 
   return flag_dict

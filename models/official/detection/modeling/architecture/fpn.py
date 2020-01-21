@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,10 +25,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import functools
+
+from six.moves import range
+import tensorflow.compat.v1 as tf
 
 from modeling.architecture import nn_ops
-from utils import spatial_transform
+from ops import spatial_transform_ops
 
 
 class Fpn(object):
@@ -37,6 +41,8 @@ class Fpn(object):
                min_level=3,
                max_level=7,
                fpn_feat_dims=256,
+               use_separable_conv=False,
+               use_batch_norm=True,
                batch_norm_relu=nn_ops.BatchNormRelu()):
     """FPN initialization function.
 
@@ -44,13 +50,21 @@ class Fpn(object):
       min_level: `int` minimum level in FPN output feature maps.
       max_level: `int` maximum level in FPN output feature maps.
       fpn_feat_dims: `int` number of filters in FPN layers.
+      use_separable_conv: `bool`, if True use separable convolution for
+        convolution in FPN layers.
+      use_batch_norm: 'bool', indicating whether batchnorm layers are added.
       batch_norm_relu: an operation that includes a batch normalization layer
         followed by a relu layer(optional).
     """
     self._min_level = min_level
     self._max_level = max_level
     self._fpn_feat_dims = fpn_feat_dims
-
+    if use_separable_conv:
+      self._conv2d_op = functools.partial(
+          tf.layers.separable_conv2d, depth_multiplier=1)
+    else:
+      self._conv2d_op = tf.layers.conv2d
+    self._use_batch_norm = use_batch_norm
     self._batch_norm_relu = batch_norm_relu
 
   def __call__(self, multilevel_features, is_training=False):
@@ -67,7 +81,7 @@ class Fpn(object):
       [min_level, min_level + 1, ..., max_level]. The values are corresponding
       FPN features with shape [batch_size, height_l, width_l, fpn_feat_dims].
     """
-    input_levels = multilevel_features.keys()
+    input_levels = list(multilevel_features.keys())
     if min(input_levels) > self._min_level:
       raise ValueError(
           'The minimum backbone level %d should be '%(min(input_levels)) +
@@ -77,7 +91,7 @@ class Fpn(object):
       # Adds lateral connections.
       feats_lateral = {}
       for level in range(self._min_level, backbone_max_level + 1):
-        feats_lateral[level] = tf.layers.conv2d(
+        feats_lateral[level] = self._conv2d_op(
             multilevel_features[level],
             filters=self._fpn_feat_dims,
             kernel_size=(1, 1),
@@ -87,12 +101,12 @@ class Fpn(object):
       # Adds top-down path.
       feats = {backbone_max_level: feats_lateral[backbone_max_level]}
       for level in range(backbone_max_level - 1, self._min_level - 1, -1):
-        feats[level] = spatial_transform.nearest_upsampling(
+        feats[level] = spatial_transform_ops.nearest_upsampling(
             feats[level + 1], 2) + feats_lateral[level]
 
       # Adds post-hoc 3x3 convolution kernel.
       for level in range(self._min_level, backbone_max_level + 1):
-        feats[level] = tf.layers.conv2d(
+        feats[level] = self._conv2d_op(
             feats[level],
             filters=self._fpn_feat_dims,
             strides=(1, 1),
@@ -105,17 +119,18 @@ class Fpn(object):
         feats_in = feats[level - 1]
         if level > backbone_max_level + 1:
           feats_in = tf.nn.relu(feats_in)
-        feats[level] = tf.layers.conv2d(
+        feats[level] = self._conv2d_op(
             feats_in,
             filters=self._fpn_feat_dims,
             strides=(2, 2),
             kernel_size=(3, 3),
             padding='same',
             name='p%d' % level)
-      # Adds batch_norm layer.
-      for level in range(self._min_level, self._max_level + 1):
-        feats[level] = self._batch_norm_relu(
-            feats[level], relu=False, is_training=is_training,
-            name='p%d-bn' % level)
-    return feats
 
+      if self._use_batch_norm:
+        # Adds batch_norm layer.
+        for level in range(self._min_level, self._max_level + 1):
+          feats[level] = self._batch_norm_relu(
+              feats[level], relu=False, is_training=is_training,
+              name='p%d-bn' % level)
+    return feats

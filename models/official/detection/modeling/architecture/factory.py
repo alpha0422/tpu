@@ -17,18 +17,22 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
 from modeling.architecture import fpn
 from modeling.architecture import heads
+from modeling.architecture import identity
 from modeling.architecture import nasfpn
 from modeling.architecture import nn_ops
 from modeling.architecture import resnet
 
 
-def batch_norm_relu_generator(params):
+def batch_norm_relu_generator(params, activation='relu'):
   return nn_ops.BatchNormRelu(
       momentum=params.batch_norm_momentum,
       epsilon=params.batch_norm_epsilon,
-      trainable=params.batch_norm_trainable)
+      trainable=params.batch_norm_trainable,
+      use_sync_bn=params.use_sync_bn,
+      activation=activation)
 
 
 def dropblock_generator(params):
@@ -60,6 +64,8 @@ def multilevel_features_generator(params):
         min_level=fpn_params.min_level,
         max_level=fpn_params.max_level,
         fpn_feat_dims=fpn_params.fpn_feat_dims,
+        use_separable_conv=fpn_params.use_separable_conv,
+        use_batch_norm=fpn_params.use_batch_norm,
         batch_norm_relu=batch_norm_relu_generator(fpn_params.batch_norm))
   elif params.architecture.multilevel_features == 'nasfpn':
     nasfpn_params = params.nasfpn
@@ -71,6 +77,8 @@ def multilevel_features_generator(params):
         use_separable_conv=nasfpn_params.use_separable_conv,
         dropblock=dropblock_generator(nasfpn_params.dropblock),
         batch_norm_relu=batch_norm_relu_generator(nasfpn_params.batch_norm))
+  elif params.architecture.multilevel_features == 'identity':
+    fpn_fn = identity.Identity()
   else:
     raise ValueError('The multi-level feature model %s is not supported.'
                      % params.architecture.multilevel_features)
@@ -86,7 +94,10 @@ def retinanet_head_generator(params):
       params.anchors_per_location,
       params.retinanet_head_num_convs,
       params.retinanet_head_num_filters,
-      batch_norm_relu=batch_norm_relu_generator(params.batch_norm))
+      params.use_separable_conv,
+      params.use_batch_norm,
+      batch_norm_relu=batch_norm_relu_generator(
+          params.batch_norm, params.activation))
 
 
 def rpn_head_generator(params):
@@ -94,6 +105,10 @@ def rpn_head_generator(params):
   return heads.RpnHead(params.min_level,
                        params.max_level,
                        params.anchors_per_location,
+                       params.num_convs,
+                       params.num_filters,
+                       params.use_separable_conv,
+                       params.use_batch_norm,
                        batch_norm_relu=batch_norm_relu_generator(
                            params.batch_norm))
 
@@ -101,7 +116,12 @@ def rpn_head_generator(params):
 def fast_rcnn_head_generator(params):
   """Generator function for Fast R-CNN head architecture."""
   return heads.FastrcnnHead(params.num_classes,
-                            params.fast_rcnn_mlp_head_dim,
+                            params.num_convs,
+                            params.num_filters,
+                            params.use_separable_conv,
+                            params.num_fcs,
+                            params.fc_dims,
+                            params.use_batch_norm,
                             batch_norm_relu=batch_norm_relu_generator(
                                 params.batch_norm))
 
@@ -109,7 +129,11 @@ def fast_rcnn_head_generator(params):
 def mask_rcnn_head_generator(params):
   """Generator function for Mask R-CNN head architecture."""
   return heads.MaskrcnnHead(params.num_classes,
-                            params.mrcnn_resolution,
+                            params.mask_target_size,
+                            params.num_convs,
+                            params.num_filters,
+                            params.use_separable_conv,
+                            params.use_batch_norm,
                             batch_norm_relu=batch_norm_relu_generator(
                                 params.batch_norm))
 
@@ -121,12 +145,8 @@ def shapeprior_head_generator(params):
       params.num_downsample_channels,
       params.mask_crop_size,
       params.use_category_for_mask,
-      params.num_of_instances,
-      params.min_mask_level,
-      params.max_mask_level,
-      params.num_clusters,
-      params.temperature,
-      params.shape_prior_path)
+      params.shape_prior_path,
+      batch_norm_relu=batch_norm_relu_generator(params.batch_norm))
 
 
 def coarsemask_head_generator(params):
@@ -136,7 +156,8 @@ def coarsemask_head_generator(params):
       params.num_downsample_channels,
       params.mask_crop_size,
       params.use_category_for_mask,
-      params.num_convs)
+      params.num_convs,
+      batch_norm_relu=batch_norm_relu_generator(params.batch_norm))
 
 
 def finemask_head_generator(params):
@@ -145,6 +166,17 @@ def finemask_head_generator(params):
       params.num_classes,
       params.num_downsample_channels,
       params.mask_crop_size,
+      params.use_category_for_mask,
       params.num_convs,
-      params.coarse_mask_thr,
-      params.gt_upsample_scale)
+      params.upsample_factor,
+      batch_norm_relu=batch_norm_relu_generator(params.batch_norm))
+
+
+def segmentation_head_generator(params):
+  """Generator function for Segmentation head architecture."""
+  return heads.SegmentationHead(
+      params.num_classes,
+      params.level,
+      params.num_convs,
+      params.use_batch_norm,
+      batch_norm_relu=batch_norm_relu_generator(params.batch_norm))
